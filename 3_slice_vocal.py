@@ -9,7 +9,7 @@ import argparse
 import pyloudnorm as pyln
 import soundfile as sf
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 
 def load_audio(file, sr):
     try:
@@ -193,6 +193,13 @@ class Slicer:
 def process_file(file, slicer, opt_root, _max, alpha):
     try:
         name = os.path.splitext(os.path.basename(file))[0]
+        if not os.path.exists(file):
+            raise RuntimeError("You input a wrong audio path that does not exists, please fix it!")
+        directory_path = os.path.dirname(file)
+        speaker = os.path.basename(directory_path)
+        opt_root = os.path.join(opt_root,speaker)
+        os.makedirs(opt_root,exist_ok=True)
+               
         audio = load_audio(file, 44100)
         chunks = slicer.slice(audio)
         for i, chunk in enumerate(chunks):
@@ -213,16 +220,21 @@ def process_file(file, slicer, opt_root, _max, alpha):
     except Exception:
         print(traceback.format_exc())
         print("文件处理失败:", file)
+def split_files(input_files, max_workers):
+    chunk_size = (len(input_files) + max_workers - 1) // max_workers
+    return [input_files[i:i + chunk_size] for i in range(0, len(input_files), chunk_size)]
 
 def slice_audio(inp, opt_root, threshold, min_length, min_interval, hop_size, max_sil_kept, _max, alpha):
     os.makedirs(opt_root, exist_ok=True)
     if os.path.isfile(inp):
         input_files = [inp]
     elif os.path.isdir(inp):
-        input_files = [os.path.join(inp, name) for name in sorted(list(os.listdir(inp)))]
+        input_files = []
+        for root, dirs, files in os.walk(inp):
+            for file_path in files:
+                input_files.append(os.path.join(root, file_path))
     else:
-        return "输入路径存在但既不是文件也不是文件夹"    
-    
+        return "输入路径存在但既不是文件也不是文件夹"
     slicer = Slicer(
         sr=44100,
         threshold=int(threshold),
@@ -233,10 +245,44 @@ def slice_audio(inp, opt_root, threshold, min_length, min_interval, hop_size, ma
     )
     _max = float(_max)
     alpha = float(alpha)
-    
-    with ThreadPoolExecutor(max_workers=60) as executor:
+    max_workers = 2
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(process_file, file, slicer, opt_root, _max, alpha) for file in input_files]
         for future in tqdm(as_completed(futures), total=len(futures)):
             future.result()
 
-slice_audio("/data2/yazhou.yang/wav", "/data2/yazhou.yang/3_slice", -40, 5000, 300, 20, 5000, -1, -1)
+
+def main():
+    parser = argparse.ArgumentParser(description='Slice WAV audio by slience')
+    parser.add_argument('--source', '-s', type=str, required=True, help='Source folder containing wav files')
+    parser.add_argument('--target', '-t', type=str, required=True, help='Target folder to save extracted WAV files')
+    parser.add_argument('--threshold', type=float, default=-40,
+                        help='Threshold value: volumes below this value are considered potential cut points')
+    parser.add_argument('--min-length', type=int, default=5000,
+                        help='Minimum length of each segment; if the first segment is too short, it will be combined with subsequent segments until this length is reached')
+    parser.add_argument('--min-interval', type=int, default=300,
+                        help='Minimum interval between cuts')
+    parser.add_argument('--hop-size', type=int, default=20,
+                        help='Hop size for calculating volume curve (smaller values provide higher precision but increased computational cost; note that higher precision does not necessarily guarantee better results)')
+    parser.add_argument('--max-sil-kept', type=int, default=5000,
+                        help='Maximum silence duration to keep after slicing')
+    parser.add_argument('--max-normalized', type=float, default=-1,
+                        help='Normalized maximum value after scaling')
+    parser.add_argument('--alpha-mix', type=float, default=-1,
+                        help='Mixing ratio for normalized audio')
+    args = parser.parse_args()
+
+    slice_audio(
+        inp=args.source,
+        opt_root=args.target,
+        threshold=args.threshold,
+        min_length=args.min_length,
+        min_interval=args.min_interval,
+        hop_size=args.hop_size,
+        max_sil_kept=args.max_sil_kept,
+        _max=args.max_normalized,
+        alpha=args.alpha_mix
+    )
+
+if __name__ == '__main__':
+    main()
